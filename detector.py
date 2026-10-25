@@ -5,8 +5,9 @@ import numpy as np
 DEFAULTS = {
     # Область поиска в долях окна: [x0, y0, x1, y1] — диалог всегда по центру.
     "roi": [0.2, 0.2, 0.8, 0.85],
-    # Зелёный в HSV OpenCV (H: 0..180, S/V: 0..255)
-    "hue_min": 35, "hue_max": 85, "sat_min": 90, "val_min": 80,
+    # Бирюзово-зелёный в HSV OpenCV (H: 0..180, S/V: 0..255).
+    # Замер по реальным скриншотам: кнопка ПРИНЯТЬ/ACCEPT ≈ H 77, S 75–90, V 85–95.
+    "hue_min": 60, "hue_max": 95, "sat_min": 45, "val_min": 60,
     # Размер кнопки в долях окна
     "min_width_frac": 0.07, "max_width_frac": 0.40,
     "min_height_frac": 0.025, "max_height_frac": 0.15,
@@ -27,7 +28,8 @@ def find_accept_button(img_bgr, cfg=None):
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (c["hue_min"], c["sat_min"], c["val_min"]), (c["hue_max"], 255, 255))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # RETR_LIST, а не EXTERNAL: у диалога зелёная рамка, и кнопка оказывается контуром внутри неё.
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     best = None
     for cnt in contours:

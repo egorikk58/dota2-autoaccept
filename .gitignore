@@ -3,3 +3,9 @@ config.json
 logs/
 __pycache__/
 *.pyc
+# Сборка exe
+build/
+dist/
+*.spec
+# Скриншоты для тестов детектора
+*.png

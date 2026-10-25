@@ -1,8 +1,10 @@
 """Dota 2 Auto Accept — автопринятие найденной игры + пуш на телефон через ntfy.
 
-Запуск:  pythonw main.py                 — иконка в трее
-         python main.py --test-image F   — проверить детектор на скриншоте
-         python main.py --test-notify    — отправить тестовый пуш
+Запуск:  pythonw main.py                   — иконка в трее
+         pythonw main.py --wait-for-dota   — ждать запуска Dota (так работает автозапуск)
+         python main.py --autostart on|off — запуск вместе с Windows
+         python main.py --test-image F     — проверить детектор на скриншоте
+         python main.py --test-notify      — отправить тестовый пуш
 """
 import argparse
 import copy
@@ -25,9 +27,16 @@ from PIL import Image, ImageDraw
 import detector
 import gsi
 import notifier
+import welcome
 import winutil
 
-APP_DIR = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)  # собрано PyInstaller'ом в exe
+if FROZEN:
+    # exe могут держать в «Загрузках» и переносить — настройки храним отдельно.
+    APP_DIR = Path(os.environ["APPDATA"]) / "DotaAutoAccept"
+    APP_DIR.mkdir(exist_ok=True)
+else:
+    APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 LOG_DIR = APP_DIR / "logs"
 
@@ -74,20 +83,26 @@ def copy_to_clipboard(text):
                    creationflags=subprocess.CREATE_NO_WINDOW)
 
 
-def show_welcome(topic):
-    """Первый запуск: показываем пользователю его личный топик."""
-    copy_to_clipboard(topic)
-    text = (
-        f"Твой личный ntfy-топик:\n\n    {topic}\n\n"
-        "(уже скопирован в буфер обмена)\n\n"
-        "1. Установи приложение ntfy на телефон (App Store / Google Play).\n"
-        "2. Нажми «+» → Subscribe to topic → вставь топик, сервер ntfy.sh.\n"
-        "3. В меню иконки в трее нажми «Тестовый пуш на телефон».\n\n"
-        "Никому не показывай топик: по нему можно читать твои уведомления.\n"
-        "Скопировать его ещё раз можно из меню иконки в трее."
+def show_welcome(cfg, block=False):
+    """Окно с личным топиком и QR-кодом: при первом запуске и из меню трея."""
+    ntfy = notifier.Ntfy(cfg["ntfy_server"], cfg["ntfy_topic"])
+    welcome.show(
+        cfg["ntfy_server"], cfg["ntfy_topic"],
+        on_copy=lambda: copy_to_clipboard(cfg["ntfy_topic"]),
+        on_test=lambda: ntfy.send("Dota 2 Auto Accept", "Тест: уведомления работают 👍", 3, ["white_check_mark"]),
+        block=block,
     )
-    threading.Thread(target=ctypes.windll.user32.MessageBoxW,
-                     args=(None, text, "Dota 2 Auto Accept", 0x40), daemon=True).start()
+
+
+_mutex = None
+
+
+def already_running():
+    global _mutex
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    _mutex = k32.CreateMutexW(None, False, "Local\\Dota2AutoAccept")
+    return ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
 
 
 STARTUP_LNK = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup\Dota2AutoAccept.lnk"
@@ -102,24 +117,27 @@ def set_autostart(enable):
         STARTUP_LNK.unlink(missing_ok=True)
         log.info("автозапуск выключен")
         return
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    if FROZEN:
+        exe, args = Path(sys.executable), "--wait-for-dota"
+    else:
+        exe, args = Path(sys.executable).with_name("pythonw.exe"), f'"{APP_DIR / "main.py"}" --wait-for-dota'
     ps = (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK);"
         "$s.TargetPath = $env:EXE; $s.Arguments = $env:ARGS;"
         "$s.WorkingDirectory = $env:DIR; $s.Save()"
     )
-    env = {**os.environ, "LNK": str(STARTUP_LNK), "EXE": str(pythonw),
-           "ARGS": f'"{APP_DIR / "main.py"}" --wait-for-dota', "DIR": str(APP_DIR)}
+    env = {**os.environ, "LNK": str(STARTUP_LNK), "EXE": str(exe), "ARGS": args, "DIR": str(exe.parent)}
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=True,
                    creationflags=subprocess.CREATE_NO_WINDOW)
     log.info("автозапуск включён: %s", STARTUP_LNK)
 
 
-def make_icon(color):
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+def make_icon(color, size=64):
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse((4, 4, 60, 60), fill=color, outline=(20, 20, 20), width=3)
-    d.text((24, 18), "D", fill=(255, 255, 255))
+    s = size / 64
+    d.ellipse((4 * s, 4 * s, 60 * s, 60 * s), fill=color, outline=(20, 20, 20), width=max(1, round(3 * s)))
+    d.text((size / 2, size / 2), "D", fill=(255, 255, 255), anchor="mm", font_size=int(34 * s))
     return img
 
 
@@ -302,9 +320,8 @@ class App:
                 pystray.MenuItem(lambda _: f"Статус: {self.status}", None, enabled=False),
                 pystray.MenuItem("Автопринятие", self.toggle, checked=lambda _: self.enabled, default=True),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Подключить телефон (топик и QR)…", lambda *_: show_welcome(self.cfg)),
                 pystray.MenuItem("Тестовый пуш на телефон", self.test_notify),
-                pystray.MenuItem(f"Скопировать мой ntfy-топик ({self.cfg['ntfy_topic']})",
-                                 lambda *_: copy_to_clipboard(self.cfg["ntfy_topic"])),
                 pystray.MenuItem("Скриншот Dota для отладки", self.debug_screenshot),
                 pystray.MenuItem("Запускать вместе с Windows (ждать Dota)",
                                  lambda *_: set_autostart(not autostart_enabled()),
@@ -350,10 +367,23 @@ def main():
         print("автозапуск:", "включён" if autostart_enabled() else "выключен")
         return
 
+    if already_running():
+        # Повторный двойной клик по exe: программа уже ждёт в фоне — просто показываем окно телефона.
+        if not args.wait_for_dota:
+            show_welcome(cfg, block=True)
+        return
+
     if not cfg.get("welcome_shown"):
-        show_welcome(cfg["ntfy_topic"])
+        # Первый запуск: сразу включаем автозапуск и показываем, как подключить телефон.
+        try:
+            set_autostart(True)
+        except Exception:
+            log.exception("не удалось включить автозапуск")
+        show_welcome(cfg)
         cfg["welcome_shown"] = True
         CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    elif autostart_enabled() and not args.wait_for_dota:
+        set_autostart(True)  # exe могли перенести в другую папку — обновляем путь в ярлыке
     App(cfg).run(wait_for_dota=args.wait_for_dota)
 
 
